@@ -146,6 +146,10 @@ tr.tot td{font-weight:650;border-top:1px solid var(--axis);background:var(--surf
 .seg{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .seg button{padding:5px 11px;font-size:12.5px}
 .seg button.on{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.sapnavbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:6px}
+.sapnav{padding:7px 14px;font-size:13px;border:0;background:none;color:var(--ink-2);border-radius:8px}
+.sapnav:hover{background:var(--surface-2)}
+.sapnav.on{background:var(--accent);color:var(--accent-ink);font-weight:600}
 .toolbar{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:12px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px 14px}
 .toolbar .lb{font-size:12px;color:var(--muted);margin-right:2px}
 #tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--ink);border:1px solid var(--border);box-shadow:0 6px 20px rgba(0,0,0,.18);border-radius:8px;padding:8px 10px;font-size:12px;display:none;z-index:9;min-width:150px}
@@ -2993,7 +2997,10 @@ function vCal(v) {
 function calDiasPorMesTot(t, meses) { const dpm = calDiasPorMes(t.ini, t.fim); return Object.entries(dpm).reduce((s, [m, a]) => s + (meses.includes(m) ? a.length : 0), 0); }
 
 // ===================== ESTOQUE E INVENTÁRIO (SAP · Supabase) =====================
-const ESTQ = { items: null, movs: [], live: false, loading: false, loaded: false, erro: '', q: '', tipo: 'all', tok: null, email: '', openRow: null, openNew: false };
+const ESTQ = { items: null, movs: [], live: false, loading: false, loaded: false, erro: '', q: '', tipo: 'all', tok: null, email: '', openRow: null, openNew: false,
+  sapView: 'operacao', almoxs: null, cats: null, saldoAlmox: null, reqs: null, forns: null, pedidos: null, alertas: null,
+  reqDraft: [], reqHdr: { solic: '', obra: '', obs: '' }, pedDraft: [], pedHdr: { forn: '', obs: '' }, openForm: '' };
+function estqNeed(key, loader) { if (ESTQ[key] === null && !ESTQ['_l' + key]) { ESTQ['_l' + key] = 1; Promise.resolve(loader()).finally(() => { ESTQ['_l' + key] = 0; }); } }
 function estqSB() { return (typeof SB_API !== 'undefined' && SB_API && SB_API.url) ? SB_API : null; }
 (function () { try { ESTQ.tok = localStorage.getItem('plx-sb-tok') || null; ESTQ.email = localStorage.getItem('plx-sb-email') || ''; } catch (e) { } })();
 function estqSeed() { const e = D.estoque; return e ? e.itens.map((it, i) => ({ id: it.id || ('i' + i), ...it })) : []; }
@@ -3012,12 +3019,12 @@ async function sbReq(path, { method = 'GET', body = null, auth = false, prefer =
 async function estqLoad() {
   if (!estqSB() || ESTQ.loading) return; ESTQ.loading = true; ESTQ.erro = '';
   try {
-    const sal = await sbReq('/estoque_saldo?select=id,descricao,tipo,categoria,condicao,unitario,qtd_atual,valor_atual,status,ult_mov&order=valor_atual.desc');
-    ESTQ.items = sal.map(r => ({ id: r.id, desc: r.descricao, qtd: +r.qtd_atual || 0, unit: +r.unitario || 0, total: +r.valor_atual || 0, tipo: r.tipo || '', cat: r.categoria || '', cond: r.condicao || '', status: r.status, ult: r.ult_mov }));
+    const sal = await sbReq('/estoque_saldo?select=id,codigo,descricao,tipo,categoria,condicao,unitario,qtd_atual,valor_atual,status,ult_mov,estoque_min,estoque_ideal,almox_padrao&order=valor_atual.desc');
+    ESTQ.items = sal.map(r => ({ id: r.id, cod: r.codigo || '', desc: r.descricao, qtd: +r.qtd_atual || 0, unit: +r.unitario || 0, total: +r.valor_atual || 0, tipo: r.tipo || '', cat: r.categoria || '', cond: r.condicao || '', status: r.status, ult: r.ult_mov, min: +r.estoque_min || 0, ideal: r.estoque_ideal == null ? null : +r.estoque_ideal, almox: r.almox_padrao || '' }));
     ESTQ.live = true; ESTQ.loaded = true;
     try { ESTQ.movs = await sbReq('/estoque_mov?select=data,tipo,qtd,motivo,obra_cc,responsavel,item_id&order=criado_em.desc&limit=25'); } catch (e) { ESTQ.movs = []; }
   } catch (e) { ESTQ.erro = e.message; ESTQ.loaded = true; }
-  ESTQ.loading = false; if (TAB === 'estoque') render();
+  ESTQ.loading = false; if (TAB === 'estoque' || TAB === 'sap') render();
 }
 async function estqLogin(email, pass) {
   const sb = estqSB(); const r = await fetch(sb.url + '/auth/v1/token?grant_type=password', { method: 'POST', headers: { apikey: sb.pub, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: pass }) });
@@ -3030,7 +3037,26 @@ async function estqMov(id, tipo, qtd, motivo, obra) { try { await sbReq('/estoqu
 async function estqNovo(o) { try { const it = await sbReq('/estoque_item', { method: 'POST', auth: true, prefer: 'return=representation', body: { descricao: o.desc, tipo: o.tipo, categoria: o.cat, condicao: o.cond, unitario: o.unit, status: 'ativo' } }); const id = it[0].id; if (o.qtd) await sbReq('/estoque_mov', { method: 'POST', auth: true, prefer: 'return=minimal', body: { item_id: id, tipo: 'entrada', qtd: o.qtd, motivo: 'Cadastro inicial', responsavel: ESTQ.email || null } }); ESTQ.openNew = false; await estqLoad(); } catch (e) { alert('Não criou: ' + e.message); } }
 async function estqBaixar(id) { const it = estqCur().find(x => x.id === id); if (!confirm('Dar baixa em "' + (it ? it.desc : id) + '"? (zera o saldo e marca como baixado)')) return; try { if (it && it.qtd) await sbReq('/estoque_mov', { method: 'POST', auth: true, prefer: 'return=minimal', body: { item_id: id, tipo: 'saida', qtd: -Math.abs(it.qtd), motivo: 'Baixa de item', responsavel: ESTQ.email || null } }); await sbReq('/estoque_item?id=eq.' + id, { method: 'PATCH', auth: true, body: { status: 'baixado' } }); await estqLoad(); } catch (e) { alert('Erro: ' + e.message); } }
 
-function estqRefresh() { ESTQ.loaded = false; ESTQ.erro = ''; estqLoad(); }
+function estqRefresh() { ESTQ.loaded = false; ESTQ.erro = ''; ESTQ.almoxs = null; ESTQ.cats = null; ESTQ.saldoAlmox = null; ESTQ.reqs = null; ESTQ.forns = null; ESTQ.pedidos = null; ESTQ.alertas = null; estqLoad(); }
+
+// ---------- ERP: loaders por módulo ----------
+async function estqLoadAlmox() { try { const [a, c, sa] = await Promise.all([sbReq('/almoxarifado?select=*&order=nome'), sbReq('/categoria?select=*&order=nome'), sbReq('/estoque_saldo_almox?select=almoxarifado,qtd,valor')]); ESTQ.almoxs = a; ESTQ.cats = c; ESTQ.saldoAlmox = sa; } catch (e) { ESTQ.erro = e.message; if (ESTQ.almoxs === null) ESTQ.almoxs = []; } if (TAB === 'sap') render(); }
+async function estqLoadReq() { try { ESTQ.reqs = await sbReq('/requisicao?select=*,requisicao_item(*)&order=criado_em.desc&limit=100'); } catch (e) { ESTQ.erro = e.message; if (ESTQ.reqs === null) ESTQ.reqs = []; } if (TAB === 'sap') render(); }
+async function estqLoadCompras() { try { const [f, p] = await Promise.all([sbReq('/fornecedor?select=*&order=nome'), sbReq('/pedido_compra?select=*,fornecedor(nome),pedido_item(*)&order=criado_em.desc&limit=100')]); ESTQ.forns = f; ESTQ.pedidos = p; } catch (e) { ESTQ.erro = e.message; if (ESTQ.forns === null) ESTQ.forns = []; if (ESTQ.pedidos === null) ESTQ.pedidos = []; } if (TAB === 'sap') render(); }
+async function estqLoadAlertas() { try { ESTQ.alertas = await sbReq('/estoque_alertas?select=*&order=sugestao_compra.desc'); } catch (e) { ESTQ.erro = e.message; if (ESTQ.alertas === null) ESTQ.alertas = []; } if (TAB === 'sap') render(); }
+
+// ---------- ERP: ações (CRUD) ----------
+async function setEstoqueMin(id, mn, idl) { try { await sbReq('/estoque_item?id=eq.' + id, { method: 'PATCH', auth: true, body: { estoque_min: mn, estoque_ideal: idl } }); ESTQ.alertas = null; const it = estqCur().find(x => x.id === id); if (it) { it.min = mn; it.ideal = idl; } estqLoadAlertas(); } catch (e) { alert('Não salvou o mínimo: ' + e.message); } }
+async function criarAlmox(o) { try { await sbReq('/almoxarifado', { method: 'POST', auth: true, prefer: 'return=minimal', body: { nome: o.nome, descricao: o.desc || null, responsavel: o.resp || null } }); ESTQ.almoxs = null; ESTQ.openForm = ''; estqLoadAlmox(); } catch (e) { alert('Não criou: ' + e.message); } }
+async function criarCategoria(o) { try { await sbReq('/categoria', { method: 'POST', auth: true, prefer: 'return=minimal', body: { nome: o.nome, grupo: o.grupo || null } }); ESTQ.cats = null; ESTQ.openForm = ''; estqLoadAlmox(); } catch (e) { alert('Não criou: ' + e.message); } }
+async function criarFornecedor(o) { try { await sbReq('/fornecedor', { method: 'POST', auth: true, prefer: 'return=minimal', body: { nome: o.nome, cnpj: o.cnpj || null, contato: o.contato || null, telefone: o.tel || null, email: o.email || null, obs: o.obs || null } }); ESTQ.forns = null; ESTQ.openForm = ''; estqLoadCompras(); } catch (e) { alert('Não criou: ' + e.message); } }
+async function criarRequisicao() { const its = ESTQ.reqDraft; if (!its.length) { alert('Adicione pelo menos um item.'); return; } try { const r = await sbReq('/requisicao', { method: 'POST', auth: true, prefer: 'return=representation', body: { solicitante: ESTQ.reqHdr.solic || ESTQ.email, obra_cc: ESTQ.reqHdr.obra || null, observacao: ESTQ.reqHdr.obs || null } }); const rid = r[0].id; await sbReq('/requisicao_item', { method: 'POST', auth: true, prefer: 'return=minimal', body: its.map(x => ({ requisicao_id: rid, item_id: x.item_id, descricao: x.desc, qtd: x.qtd })) }); ESTQ.reqDraft = []; ESTQ.reqHdr = { solic: '', obra: '', obs: '' }; ESTQ.openForm = ''; ESTQ.reqs = null; estqLoadReq(); } catch (e) { alert('Não criou a requisição: ' + e.message); } }
+async function aprovarReq(id) { try { await sbReq('/requisicao?id=eq.' + id, { method: 'PATCH', auth: true, body: { status: 'aprovada', aprovado_por: ESTQ.email } }); ESTQ.reqs = null; estqLoadReq(); } catch (e) { alert('Erro: ' + e.message); } }
+async function cancelarReq(id) { if (!confirm('Cancelar esta requisição?')) return; try { await sbReq('/requisicao?id=eq.' + id, { method: 'PATCH', auth: true, body: { status: 'cancelada' } }); ESTQ.reqs = null; estqLoadReq(); } catch (e) { alert('Erro: ' + e.message); } }
+async function entregarReq(req) { if (!confirm('Entregar a requisição #' + req.numero + '? Isso dá SAÍDA no estoque para os itens cadastrados.')) return; try { for (const li of (req.requisicao_item || [])) { if (li.item_id && li.qtd) { await sbReq('/estoque_mov', { method: 'POST', auth: true, prefer: 'return=minimal', body: { item_id: li.item_id, tipo: 'saida', qtd: -Math.abs(li.qtd), motivo: 'Requisição #' + req.numero, obra_cc: req.obra_cc || null, responsavel: ESTQ.email || null, requisicao_id: req.id } }); await sbReq('/requisicao_item?id=eq.' + li.id, { method: 'PATCH', auth: true, body: { atendido: li.qtd } }); } } await sbReq('/requisicao?id=eq.' + req.id, { method: 'PATCH', auth: true, body: { status: 'entregue' } }); ESTQ.reqs = null; ESTQ.loaded = false; estqLoad(); estqLoadReq(); } catch (e) { alert('Erro ao entregar: ' + e.message); } }
+async function criarPedido() { const its = ESTQ.pedDraft; if (!ESTQ.pedHdr.forn) { alert('Escolha o fornecedor.'); return; } if (!its.length) { alert('Adicione pelo menos um item.'); return; } try { const r = await sbReq('/pedido_compra', { method: 'POST', auth: true, prefer: 'return=representation', body: { fornecedor_id: ESTQ.pedHdr.forn, obs: ESTQ.pedHdr.obs || null } }); const pid = r[0].id; await sbReq('/pedido_item', { method: 'POST', auth: true, prefer: 'return=minimal', body: its.map(x => ({ pedido_id: pid, item_id: x.item_id, descricao: x.desc, qtd: x.qtd, unitario: x.unit || null })) }); ESTQ.pedDraft = []; ESTQ.pedHdr = { forn: '', obs: '' }; ESTQ.openForm = ''; ESTQ.pedidos = null; estqLoadCompras(); } catch (e) { alert('Não criou o pedido: ' + e.message); } }
+async function cancelarPedido(id) { if (!confirm('Cancelar este pedido de compra?')) return; try { await sbReq('/pedido_compra?id=eq.' + id, { method: 'PATCH', auth: true, body: { status: 'cancelado' } }); ESTQ.pedidos = null; estqLoadCompras(); } catch (e) { alert('Erro: ' + e.message); } }
+async function receberPedido(ped) { if (!confirm('Receber o pedido #' + ped.numero + '? Isso dá ENTRADA no estoque para os itens cadastrados.')) return; try { for (const li of (ped.pedido_item || [])) { if (li.item_id && li.qtd) { await sbReq('/estoque_mov', { method: 'POST', auth: true, prefer: 'return=minimal', body: { item_id: li.item_id, tipo: 'entrada', qtd: Math.abs(li.qtd), motivo: 'Pedido de compra #' + ped.numero, responsavel: ESTQ.email || null, fornecedor_id: ped.fornecedor_id, pedido_id: ped.id } }); if (li.unitario) await sbReq('/estoque_item?id=eq.' + li.item_id, { method: 'PATCH', auth: true, body: { unitario: li.unitario, atualizado_em: new Date().toISOString() } }); await sbReq('/pedido_item?id=eq.' + li.id, { method: 'PATCH', auth: true, body: { recebido: li.qtd } }); } } await sbReq('/pedido_compra?id=eq.' + ped.id, { method: 'PATCH', auth: true, body: { status: 'recebido' } }); ESTQ.pedidos = null; ESTQ.loaded = false; estqLoad(); estqLoadCompras(); } catch (e) { alert('Erro ao receber: ' + e.message); } }
 
 // ---------- Aba GERENCIAL (indicadores, somente leitura) ----------
 function vEstoque(v) {
@@ -3045,6 +3071,7 @@ function vEstoque(v) {
   const topShare = totalVal ? estqTotal(ord[0] || {}) / totalVal : 0;
   const nA = Math.max(1, abc.filter(x => x.accPct <= 0.8).length);
   const zerados = items.filter(it => (+it.qtd || 0) === 0);
+  const abaixoMin = items.filter(it => (+it.min || 0) > 0 && (+it.qtd || 0) < (+it.min || 0));
   const live = ESTQ.live;
   const evLast = E && E.evol && E.evol.length ? E.evol[E.evol.length - 1] : null;
   const evPrev = E && E.evol && E.evol.length > 1 ? E.evol[E.evol.length - 2] : null;
@@ -3061,7 +3088,7 @@ function vEstoque(v) {
     ${kpi('Concentração (maior item)', pct(topShare, 0), `${esc(ord[0] ? String(ord[0].desc).slice(0, 26) : '')} · ${nA} itens = 80% (curva A)`, topShare)}
     ${kpi('Capital em "Pesado"', porCat.length ? pct((porCat.find(x => /PESAD/i.test(x[0])) || ['', { val: 0 }])[1].val / (totalVal || 1), 0) : '—', `poucos itens de alto custo concentram o valor`)}
     ${kpi('Condição Usado × Novo', porCond.length ? pct((porCond.find(x => /USAD/i.test(x[0])) || ['', { val: 0 }])[1].val / (totalVal || 1), 0) : '—', `participação de itens usados no valor`)}
-    ${kpi('Alertas', nf(zerados.length), zerados.length ? `itens ativos com saldo zero — conferir` : 'nenhum item ativo zerado', null, zerados.length ? 'warn' : '')}
+    ${kpi('Alertas', nf(zerados.length + abaixoMin.length), (abaixoMin.length ? `${nf(abaixoMin.length)} abaixo do mínimo · ` : '') + (zerados.length ? `${nf(zerados.length)} com saldo zero` : (abaixoMin.length ? 'reposição na aba SAP · Alertas' : 'nenhum alerta')), null, (zerados.length + abaixoMin.length) ? 'warn' : '')}
   </div>
   <div class="grid two mt">
     <div class="card"><h2>Evolução do patrimônio</h2><div class="cap">Valor total do inventário em cada foto registrada.</div><div id="esEv"></div></div>
@@ -3123,15 +3150,32 @@ function vSAP(v) {
     return;
   }
 
-  // logado: operação
+  // logado: ERP com navegação interna
+  const views = [['operacao', 'Operação'], ['requisicoes', 'Requisições'], ['compras', 'Compras'], ['alertas', 'Alertas'], ['almox', 'Almoxarifados']];
+  if (!views.some(x => x[0] === ESTQ.sapView)) ESTQ.sapView = 'operacao';
+  const ativos0 = estqCur().filter(it => (it.status || 'ativo') !== 'baixado');
+  const nAlerta = (ESTQ.alertas || []).length;
+  const nav = views.map(([k, l]) => `<button class="sapnav${ESTQ.sapView === k ? ' on' : ''}" data-v="${k}">${l}${k === 'alertas' && nAlerta ? ` <span class="chip bad" style="margin-left:4px">${nAlerta}</span>` : ''}</button>`).join('');
+  v.innerHTML = `
+  <div class="toolbar"><div class="note" style="flex:1;border-left:3px solid var(--good)"><b style="color:var(--good)">SAP conectado</b> · ${esc(ESTQ.email)} · ${nf(ativos0.length)} itens · ${brl(sum(ativos0, estqTotal))} <a href="#" id="sapOut" style="color:var(--s1);margin-left:6px">sair</a></div>
+    <a href="#" id="sapRf" style="color:var(--s1);align-self:center;font-size:12.5px">atualizar</a></div>
+  ${ESTQ.erro ? `<div class="note" style="border-left:3px solid var(--crit);margin-bottom:10px">Banco: ${esc(ESTQ.erro)}</div>` : ''}
+  <div class="sapnavbar">${nav}</div>
+  <div id="sapBody"></div>`;
+  { const o = $('#sapOut'); if (o) o.onclick = e => { e.preventDefault(); estqLogout(); }; }
+  { const r = $('#sapRf'); if (r) r.onclick = e => { e.preventDefault(); estqRefresh(); }; }
+  v.querySelectorAll('.sapnav').forEach(b => b.onclick = () => { ESTQ.sapView = b.dataset.v; ESTQ.openForm = ''; ESTQ.openRow = null; render(); });
+  const disp = { operacao: sapOperacao, requisicoes: sapRequisicoes, compras: sapCompras, alertas: sapAlertas, almox: sapAlmox };
+  (disp[ESTQ.sapView] || sapOperacao)($('#sapBody'));
+}
+
+// ---------- SAP · Operação (cadastro, movimentação, baixa) ----------
+function sapOperacao(body) {
   const items = estqCur();
   const ativos = items.filter(it => (it.status || 'ativo') !== 'baixado');
-  const totalVal = sum(ativos, estqTotal);
   const itById = {}; items.forEach(it => itById[it.id] = it);
-  v.innerHTML = `
-  <div class="toolbar"><div class="note" style="flex:1;border-left:3px solid var(--good)"><b style="color:var(--good)">SAP conectado</b> · logado como ${esc(ESTQ.email)} · ${nf(ativos.length)} itens ativos · ${brl(totalVal)} <a href="#" id="sapOut" style="color:var(--s1);margin-left:6px">sair</a></div>
-    <button id="sapAdd" class="primary">+ Novo item</button></div>
-  ${ESTQ.erro ? `<div class="note" style="border-left:3px solid var(--crit);margin-bottom:10px">Banco: ${esc(ESTQ.erro)}</div>` : ''}
+  body.innerHTML = `
+  <div class="toolbar" style="justify-content:flex-end;margin-bottom:8px"><button id="sapAdd" class="primary">+ Novo item</button></div>
   ${ESTQ.openNew ? estqNovoForm() : ''}
   <div class="card"><h2>Operação de estoque</h2><div class="cap">Edite o valor unitário na célula, registre movimentações (± mov) e dê baixa. Tudo gravado e rastreável no banco.</div>
     <div class="toolbar" style="margin:4px 0 10px;gap:8px;flex-wrap:wrap">
@@ -3141,8 +3185,6 @@ function vSAP(v) {
     <div class="tbl"><table><thead><tr><th>Data</th><th style="text-align:left">Item</th><th>Tipo</th><th class="n">Qtd</th><th style="text-align:left">Motivo</th><th>Obra/CC</th><th>Por</th></tr></thead><tbody>
     ${ESTQ.movs.map(m => { const it = itById[m.item_id]; return `<tr><td>${dlab(m.data)}</td><td style="text-align:left">${esc(it ? it.desc : '—')}</td><td><span class="chip ${m.qtd >= 0 ? 'ok' : 'bad'}">${esc(m.tipo)}</span></td><td class="n" style="color:${m.qtd >= 0 ? 'var(--good)' : 'var(--crit)'};font-weight:600">${m.qtd > 0 ? '+' : ''}${nf(m.qtd)}</td><td style="text-align:left">${esc(m.motivo || '—')}</td><td>${esc(m.obra_cc || '—')}</td><td>${esc((m.responsavel || '').split('@')[0] || '—')}</td></tr>`; }).join('')}
     </tbody></table></div></div>` : ''}`;
-
-  { const o = $('#sapOut'); if (o) o.onclick = e => { e.preventDefault(); estqLogout(); }; }
   { const a = $('#sapAdd'); if (a) a.onclick = () => { ESTQ.openNew = !ESTQ.openNew; render(); }; }
   bindNovoForm();
 
@@ -3213,6 +3255,194 @@ function esAbcChart(el, abc, totalVal) {
   s += `<text x="${pL}" y="${H - 8}" font-size="10" fill="${css('--muted')}">item de maior valor →</text>`;
   s += `<text x="${(W - pR)}" y="${H - 8}" font-size="10" fill="${css('--muted')}" text-anchor="end">menor valor (top ${abc.length})</text>`;
   el.innerHTML = s + '</svg>';
+}
+
+// ===================== ERP: telas dos módulos =====================
+const SAPI = 'padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--ink)';
+
+// ---------- SAP · Alertas de estoque mínimo ----------
+function sapAlertas(body) {
+  estqNeed('alertas', estqLoadAlertas);
+  const al = ESTQ.alertas;
+  const items = estqCur().filter(it => (it.status || 'ativo') !== 'baixado');
+  const comMin = items.filter(it => (+it.min || 0) > 0);
+  body.innerHTML = `
+  <div class="card"><h2>Alertas de estoque mínimo</h2><div class="cap">Itens cujo saldo está abaixo do ponto de reposição. A sugestão de compra leva ao estoque ideal (ou ao mínimo).</div>
+    ${al === null ? '<div class="note">Carregando…</div>' : !al.length ? `<div class="note" style="border-left:3px solid var(--good)">Nenhum item abaixo do mínimo.${comMin.length ? '' : ' Defina o estoque mínimo dos itens abaixo para ativar os alertas.'}</div>` :
+      `<div class="tbl"><table><thead><tr><th style="text-align:left">Item</th><th>Tipo</th><th class="n">Saldo</th><th class="n">Mínimo</th><th class="n">Ideal</th><th class="n">Comprar</th><th>Ação</th></tr></thead><tbody>
+      ${al.map(a => `<tr><td style="text-align:left">${esc(a.descricao)}</td><td>${esc(a.tipo || '—')}</td><td class="n" style="color:var(--crit);font-weight:600">${nf(+a.qtd_atual || 0)}</td><td class="n">${nf(+a.estoque_min || 0)}</td><td class="n">${a.estoque_ideal == null ? '—' : nf(+a.estoque_ideal)}</td><td class="n" style="font-weight:600">${nf(+a.sugestao_compra || 0)}</td><td><button class="al-buy" data-id="${esc(a.id)}" data-desc="${esc(a.descricao)}" data-q="${+a.sugestao_compra || 0}">pedido rápido</button></td></tr>`).join('')}
+    </tbody></table></div>`}
+  </div>
+  <div class="card mt"><h2>Definir ponto de reposição</h2><div class="cap">Informe o estoque mínimo e o ideal de cada item. Abaixo do mínimo gera alerta; a diferença até o ideal vira sugestão de compra.</div>
+    <div class="toolbar" style="margin:4px 0 10px"><input id="alQ" type="text" placeholder="Buscar item…" value="${esc(ESTQ.q)}" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);color:var(--ink)"></div>
+    <div id="alTb"></div></div>`;
+  body.querySelectorAll('.al-buy').forEach(b => b.onclick = () => { ESTQ.sapView = 'compras'; ESTQ.openForm = 'pedido'; ESTQ.pedDraft = [{ item_id: b.dataset.id, desc: b.dataset.desc, qtd: +b.dataset.q || 1, unit: 0 }]; render(); });
+  const drawAl = () => {
+    const q = ESTQ.q.trim().toLowerCase();
+    const rows = items.filter(it => !q || String(it.desc || '').toLowerCase().includes(q)).sort((a, b) => { const ba = (a.min > 0 && a.qtd < a.min) ? 0 : 1, bb = (b.min > 0 && b.qtd < b.min) ? 0 : 1; return ba - bb || estqTotal(b) - estqTotal(a); });
+    const el = $('#alTb'); if (!el) return;
+    el.innerHTML = `<div class="tbl"><table><thead><tr><th style="text-align:left">Descrição</th><th class="n">Saldo</th><th class="n">Mínimo</th><th class="n">Ideal</th><th></th></tr></thead><tbody>
+      ${rows.slice(0, 400).map(it => `<tr data-id="${esc(it.id)}"${it.min > 0 && it.qtd < it.min ? ' style="background:var(--surface-2)"' : ''}><td style="text-align:left">${esc(it.desc)}</td><td class="n">${nf(+it.qtd || 0)}</td><td class="n"><input class="al-min" type="number" step="1" value="${+it.min || 0}" style="width:76px;text-align:right"></td><td class="n"><input class="al-idl" type="number" step="1" value="${it.ideal == null ? '' : it.ideal}" style="width:76px;text-align:right"></td><td>${it.min > 0 && it.qtd < it.min ? '<span class="chip bad">abaixo</span>' : ''}</td></tr>`).join('')}
+    </tbody></table></div>`;
+    el.querySelectorAll('tr[data-id]').forEach(tr => { const id = tr.dataset.id, mn = tr.querySelector('.al-min'), idl = tr.querySelector('.al-idl'); const save = () => setEstoqueMin(id, +mn.value || 0, idl.value === '' ? null : (+idl.value || 0)); mn.onchange = save; idl.onchange = save; });
+  };
+  drawAl();
+  { const q = $('#alQ'); if (q) q.oninput = e => { ESTQ.q = e.target.value; drawAl(); }; }
+}
+
+// ---------- SAP · Almoxarifados e categorias ----------
+function sapAlmox(body) {
+  estqNeed('almoxs', estqLoadAlmox);
+  const A = ESTQ.almoxs, C = ESTQ.cats, SA = ESTQ.saldoAlmox;
+  const aggA = {}; (SA || []).forEach(r => { const k = r.almoxarifado || 'Principal'; (aggA[k] = aggA[k] || { qtd: 0, val: 0 }); aggA[k].qtd += +r.qtd || 0; aggA[k].val += +r.valor || 0; });
+  body.innerHTML = `
+  <div class="grid two">
+    <div class="card"><div class="toolbar" style="justify-content:space-between"><h2 style="margin:0">Almoxarifados</h2><button id="amAdd" class="primary">+ Novo</button></div>
+      <div class="cap">Locais de estoque. O saldo por local vem das movimentações.</div>
+      ${ESTQ.openForm === 'almox' ? `<div class="card" style="background:var(--surface-2);margin:8px 0"><div class="toolbar" style="gap:8px;flex-wrap:wrap">
+        <input id="am-n" placeholder="nome" style="width:150px;${SAPI}">
+        <input id="am-d" placeholder="descrição" style="flex:1;min-width:140px;${SAPI}">
+        <input id="am-r" placeholder="responsável" style="width:140px;${SAPI}">
+        <button id="am-ok" class="primary">Salvar</button></div></div>` : ''}
+      ${A === null ? '<div class="note">Carregando…</div>' : `<div class="tbl"><table><thead><tr><th style="text-align:left">Almoxarifado</th><th class="n">Qtd(un)</th><th class="n">Valor</th></tr></thead><tbody>
+        ${A.map(a => { const g = aggA[a.nome] || { qtd: 0, val: 0 }; return `<tr><td style="text-align:left"><b>${esc(a.nome)}</b>${a.descricao ? `<div style="font-size:11.5px;color:var(--muted)">${esc(a.descricao)}</div>` : ''}</td><td class="n">${nf(g.qtd)}</td><td class="n">${brl(g.val)}</td></tr>`; }).join('')}
+      </tbody></table></div>`}
+    </div>
+    <div class="card"><div class="toolbar" style="justify-content:space-between"><h2 style="margin:0">Categorias / famílias</h2><button id="ctAdd" class="primary">+ Nova</button></div>
+      <div class="cap">Famílias de itens para classificar o estoque.</div>
+      ${ESTQ.openForm === 'cat' ? `<div class="card" style="background:var(--surface-2);margin:8px 0"><div class="toolbar" style="gap:8px;flex-wrap:wrap">
+        <input id="ct-n" placeholder="nome" style="width:150px;${SAPI}">
+        <input id="ct-g" placeholder="grupo (opcional)" style="flex:1;min-width:140px;${SAPI}">
+        <button id="ct-ok" class="primary">Salvar</button></div></div>` : ''}
+      ${C === null ? '<div class="note">Carregando…</div>' : `<div class="tbl"><table><thead><tr><th style="text-align:left">Categoria</th><th style="text-align:left">Grupo</th></tr></thead><tbody>
+        ${C.map(c => `<tr><td style="text-align:left">${esc(c.nome)}</td><td style="text-align:left">${esc(c.grupo || '—')}</td></tr>`).join('')}
+      </tbody></table></div>`}
+    </div>
+  </div>`;
+  { const b = $('#amAdd'); if (b) b.onclick = () => { ESTQ.openForm = ESTQ.openForm === 'almox' ? '' : 'almox'; render(); }; }
+  { const b = $('#ctAdd'); if (b) b.onclick = () => { ESTQ.openForm = ESTQ.openForm === 'cat' ? '' : 'cat'; render(); }; }
+  { const b = $('#am-ok'); if (b) b.onclick = () => { const n = $('#am-n').value.trim(); if (!n) { alert('Informe o nome.'); return; } criarAlmox({ nome: n, desc: $('#am-d').value.trim(), resp: $('#am-r').value.trim() }); }; }
+  { const b = $('#ct-ok'); if (b) b.onclick = () => { const n = $('#ct-n').value.trim(); if (!n) { alert('Informe o nome.'); return; } criarCategoria({ nome: n, grupo: $('#ct-g').value.trim() }); }; }
+}
+
+// ---------- SAP · Requisições por obra/CC ----------
+function reqForm(itemsSel) {
+  return `<div class="card" style="background:var(--surface-2);margin-bottom:10px"><h2>Nova requisição</h2>
+    <div class="toolbar" style="gap:8px;flex-wrap:wrap;margin:6px 0">
+      <input id="rq-sol" placeholder="solicitante" value="${esc(ESTQ.reqHdr.solic)}" style="width:170px;${SAPI}">
+      <input id="rq-obra" placeholder="obra / centro de custo" value="${esc(ESTQ.reqHdr.obra)}" style="flex:1;min-width:160px;${SAPI}">
+      <input id="rq-obs" placeholder="observação" value="${esc(ESTQ.reqHdr.obs)}" style="flex:1;min-width:160px;${SAPI}">
+    </div>
+    <div class="toolbar" style="gap:8px;flex-wrap:wrap;margin:6px 0">
+      <select id="rq-it" style="flex:1;min-width:200px;${SAPI}">${itemsSel.map(it => `<option value="${esc(it.id)}">${esc(it.desc)} (saldo ${nf(+it.qtd || 0)})</option>`).join('')}</select>
+      <input id="rq-q" type="number" step="1" placeholder="qtd" style="width:80px;${SAPI}">
+      <button id="rq-addli">adicionar item</button>
+    </div>
+    ${ESTQ.reqDraft.length ? `<div class="tbl"><table><thead><tr><th style="text-align:left">Item</th><th class="n">Qtd</th><th></th></tr></thead><tbody>${ESTQ.reqDraft.map((d, i) => `<tr><td style="text-align:left">${esc(d.desc)}</td><td class="n">${nf(d.qtd)}</td><td><button class="rq-del" data-i="${i}" style="color:var(--crit)">remover</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="note">Adicione itens à requisição.</div>'}
+    <div class="toolbar" style="justify-content:flex-end;margin-top:8px;gap:6px"><button id="rq-ca2">cancelar</button><button id="rq-ok" class="primary">Criar requisição</button></div>
+  </div>`;
+}
+function bindReqForm(itemsSel) {
+  const addli = $('#rq-addli'); if (!addli) return;
+  const sol = $('#rq-sol'), obra = $('#rq-obra'), obs = $('#rq-obs');
+  if (sol) sol.oninput = e => ESTQ.reqHdr.solic = e.target.value;
+  if (obra) obra.oninput = e => ESTQ.reqHdr.obra = e.target.value;
+  if (obs) obs.oninput = e => ESTQ.reqHdr.obs = e.target.value;
+  addli.onclick = () => { const sel = $('#rq-it'), q = +$('#rq-q').value || 0; if (!sel.value || q <= 0) { alert('Escolha o item e a quantidade.'); return; } const it = itemsSel.find(x => x.id === sel.value); ESTQ.reqDraft.push({ item_id: sel.value, desc: it ? it.desc : 'item', qtd: q }); render(); };
+  document.querySelectorAll('.rq-del').forEach(b => b.onclick = () => { ESTQ.reqDraft.splice(+b.dataset.i, 1); render(); });
+  { const b = $('#rq-ca2'); if (b) b.onclick = () => { ESTQ.openForm = ''; render(); }; }
+  { const b = $('#rq-ok'); if (b) b.onclick = () => criarRequisicao(); }
+}
+function sapRequisicoes(body) {
+  estqNeed('reqs', estqLoadReq);
+  const R = ESTQ.reqs;
+  const stChip = s => ({ pendente: 'warn', aprovada: 'ok', entregue: 'ok', cancelada: 'bad' }[s] || '');
+  const itemsSel = estqCur().filter(it => (it.status || 'ativo') !== 'baixado');
+  body.innerHTML = `
+  <div class="toolbar" style="justify-content:space-between;margin-bottom:8px"><div class="lb">Requisições de material por obra / centro de custo</div><button id="rqAdd" class="primary">+ Nova requisição</button></div>
+  ${ESTQ.openForm === 'req' ? reqForm(itemsSel) : ''}
+  <div class="card"><h2>Requisições</h2>
+    ${R === null ? '<div class="note">Carregando…</div>' : !R.length ? '<div class="note">Nenhuma requisição ainda.</div>' :
+      `<div class="tbl"><table><thead><tr><th class="n">#</th><th>Data</th><th style="text-align:left">Solicitante</th><th style="text-align:left">Obra/CC</th><th class="n">Itens</th><th>Status</th><th>Ações</th></tr></thead><tbody>
+      ${R.map(r => { const lis = r.requisicao_item || []; const act = r.status === 'pendente' ? `<button class="rq-ap" data-id="${r.id}">aprovar</button> <button class="rq-cc" data-id="${r.id}">cancelar</button>` : r.status === 'aprovada' ? `<button class="rq-ent primary" data-id="${r.id}">entregar</button> <button class="rq-cc" data-id="${r.id}">cancelar</button>` : '—';
+        return `<tr><td class="n">${r.numero}</td><td>${dlab(r.data)}</td><td style="text-align:left">${esc((r.solicitante || '').split('@')[0] || '—')}</td><td style="text-align:left">${esc(r.obra_cc || '—')}</td><td class="n">${lis.length}</td><td><span class="chip ${stChip(r.status)}">${esc(r.status)}</span></td><td style="white-space:nowrap">${act}</td></tr>
+        <tr><td></td><td colspan="6" style="text-align:left;padding-top:0"><div style="font-size:12px;color:var(--muted)">${lis.map(li => esc((li.descricao || 'item') + ' × ' + nf(li.qtd))).join(' · ') || '—'}${r.observacao ? ` — <i>${esc(r.observacao)}</i>` : ''}</div></td></tr>`; }).join('')}
+    </tbody></table></div>`}
+  </div>`;
+  { const b = $('#rqAdd'); if (b) b.onclick = () => { ESTQ.openForm = ESTQ.openForm === 'req' ? '' : 'req'; render(); }; }
+  body.querySelectorAll('.rq-ap').forEach(b => b.onclick = () => aprovarReq(b.dataset.id));
+  body.querySelectorAll('.rq-cc').forEach(b => b.onclick = () => cancelarReq(b.dataset.id));
+  body.querySelectorAll('.rq-ent').forEach(b => b.onclick = () => { const r = (ESTQ.reqs || []).find(x => x.id === b.dataset.id); if (r) entregarReq(r); });
+  bindReqForm(itemsSel);
+}
+
+// ---------- SAP · Fornecedores e Compras ----------
+function fornForm() {
+  return `<div class="card" style="background:var(--surface-2);margin-bottom:10px"><h2>Novo fornecedor</h2><div class="toolbar" style="gap:8px;flex-wrap:wrap;margin-top:6px">
+    <input id="fn-n" placeholder="nome" style="flex:1;min-width:160px;${SAPI}">
+    <input id="fn-cnpj" placeholder="CNPJ" style="width:150px;${SAPI}">
+    <input id="fn-ct" placeholder="contato" style="width:150px;${SAPI}">
+    <input id="fn-tel" placeholder="telefone" style="width:130px;${SAPI}">
+    <input id="fn-em" placeholder="e-mail" style="width:160px;${SAPI}">
+    <button id="fn-ok" class="primary">Salvar</button></div></div>`;
+}
+function bindFornForm() { const ok = $('#fn-ok'); if (!ok) return; ok.onclick = () => { const n = $('#fn-n').value.trim(); if (!n) { alert('Informe o nome.'); return; } criarFornecedor({ nome: n, cnpj: $('#fn-cnpj').value.trim(), contato: $('#fn-ct').value.trim(), tel: $('#fn-tel').value.trim(), email: $('#fn-em').value.trim() }); }; }
+function pedForm(itemsSel, F) {
+  if (!F || !F.length) return `<div class="card" style="background:var(--surface-2);margin-bottom:10px"><div class="note">Cadastre um fornecedor antes de criar um pedido de compra.</div></div>`;
+  return `<div class="card" style="background:var(--surface-2);margin-bottom:10px"><h2>Novo pedido de compra</h2>
+    <div class="toolbar" style="gap:8px;flex-wrap:wrap;margin:6px 0">
+      <select id="pd-forn" style="min-width:200px;${SAPI}">${F.map(f => `<option value="${esc(f.id)}"${ESTQ.pedHdr.forn === f.id ? ' selected' : ''}>${esc(f.nome)}</option>`).join('')}</select>
+      <input id="pd-obs" placeholder="observação" value="${esc(ESTQ.pedHdr.obs)}" style="flex:1;min-width:160px;${SAPI}">
+    </div>
+    <div class="toolbar" style="gap:8px;flex-wrap:wrap;margin:6px 0">
+      <select id="pd-it" style="flex:1;min-width:200px;${SAPI}">${itemsSel.map(it => `<option value="${esc(it.id)}">${esc(it.desc)}</option>`).join('')}</select>
+      <input id="pd-q" type="number" step="1" placeholder="qtd" style="width:80px;${SAPI}">
+      <input id="pd-u" type="number" step="0.01" placeholder="unitário" style="width:100px;${SAPI}">
+      <button id="pd-addli">adicionar item</button>
+    </div>
+    ${ESTQ.pedDraft.length ? `<div class="tbl"><table><thead><tr><th style="text-align:left">Item</th><th class="n">Qtd</th><th class="n">Unitário</th><th class="n">Subtotal</th><th></th></tr></thead><tbody>${ESTQ.pedDraft.map((d, i) => `<tr><td style="text-align:left">${esc(d.desc)}</td><td class="n">${nf(d.qtd)}</td><td class="n">${brl(d.unit || 0)}</td><td class="n">${brl((d.qtd || 0) * (d.unit || 0))}</td><td><button class="pd-del" data-i="${i}" style="color:var(--crit)">remover</button></td></tr>`).join('')}</tbody><tfoot><tr class="tot"><td colspan="3" style="text-align:left"><b>Total</b></td><td class="n"><b>${brl(sum(ESTQ.pedDraft, d => (d.qtd || 0) * (d.unit || 0)))}</b></td><td></td></tr></tfoot></table></div>` : '<div class="note">Adicione itens ao pedido.</div>'}
+    <div class="toolbar" style="justify-content:flex-end;margin-top:8px;gap:6px"><button id="pd-ca2">cancelar</button><button id="pd-ok" class="primary">Criar pedido</button></div>
+  </div>`;
+}
+function bindPedForm(itemsSel) {
+  const addli = $('#pd-addli'); if (!addli) return;
+  const forn = $('#pd-forn'); if (forn) { if (!ESTQ.pedHdr.forn && forn.value) ESTQ.pedHdr.forn = forn.value; forn.onchange = e => ESTQ.pedHdr.forn = e.target.value; }
+  const obs = $('#pd-obs'); if (obs) obs.oninput = e => ESTQ.pedHdr.obs = e.target.value;
+  addli.onclick = () => { const sel = $('#pd-it'), q = +$('#pd-q').value || 0, u = +$('#pd-u').value || 0; if (!sel.value || q <= 0) { alert('Escolha item e quantidade.'); return; } const it = itemsSel.find(x => x.id === sel.value); ESTQ.pedDraft.push({ item_id: sel.value, desc: it ? it.desc : 'item', qtd: q, unit: u }); render(); };
+  document.querySelectorAll('.pd-del').forEach(b => b.onclick = () => { ESTQ.pedDraft.splice(+b.dataset.i, 1); render(); });
+  { const b = $('#pd-ca2'); if (b) b.onclick = () => { ESTQ.openForm = ''; render(); }; }
+  { const b = $('#pd-ok'); if (b) b.onclick = () => criarPedido(); }
+}
+function sapCompras(body) {
+  estqNeed('forns', estqLoadCompras);
+  const F = ESTQ.forns, P = ESTQ.pedidos;
+  const stChip = s => ({ aberto: 'warn', recebido: 'ok', cancelado: 'bad' }[s] || '');
+  const itemsSel = estqCur().filter(it => (it.status || 'ativo') !== 'baixado');
+  body.innerHTML = `
+  <div class="toolbar" style="justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:6px"><div class="lb">Fornecedores e pedidos de compra</div><div style="display:flex;gap:6px"><button id="fnAdd">+ Fornecedor</button><button id="pdAdd" class="primary">+ Pedido de compra</button></div></div>
+  ${ESTQ.openForm === 'forn' ? fornForm() : ''}
+  ${ESTQ.openForm === 'pedido' ? pedForm(itemsSel, F) : ''}
+  <div class="grid two">
+    <div class="card"><h2>Pedidos de compra</h2>
+      ${P === null ? '<div class="note">Carregando…</div>' : !P.length ? '<div class="note">Nenhum pedido ainda.</div>' :
+      `<div class="tbl"><table><thead><tr><th class="n">#</th><th>Data</th><th style="text-align:left">Fornecedor</th><th class="n">Itens</th><th class="n">Valor</th><th>Status</th><th>Ações</th></tr></thead><tbody>
+        ${P.map(p => { const lis = p.pedido_item || []; const val = sum(lis, li => (+li.qtd || 0) * (+li.unitario || 0)); const act = p.status === 'aberto' ? `<button class="pd-rc primary" data-id="${p.id}">receber</button> <button class="pd-cc" data-id="${p.id}">cancelar</button>` : '—';
+        return `<tr><td class="n">${p.numero}</td><td>${dlab(p.data)}</td><td style="text-align:left">${esc(p.fornecedor ? p.fornecedor.nome : '—')}</td><td class="n">${lis.length}</td><td class="n">${brl(val)}</td><td><span class="chip ${stChip(p.status)}">${esc(p.status)}</span></td><td style="white-space:nowrap">${act}</td></tr>
+        <tr><td></td><td colspan="6" style="text-align:left;padding-top:0"><div style="font-size:12px;color:var(--muted)">${lis.map(li => esc((li.descricao || 'item') + ' × ' + nf(li.qtd))).join(' · ') || '—'}</div></td></tr>`; }).join('')}
+      </tbody></table></div>`}
+    </div>
+    <div class="card"><h2>Fornecedores</h2>
+      ${F === null ? '<div class="note">Carregando…</div>' : !F.length ? '<div class="note">Nenhum fornecedor cadastrado.</div>' :
+      `<div class="tbl"><table><thead><tr><th style="text-align:left">Nome</th><th style="text-align:left">Contato</th><th>Telefone</th></tr></thead><tbody>
+        ${F.map(f => `<tr><td style="text-align:left"><b>${esc(f.nome)}</b>${f.cnpj ? `<div style="font-size:11px;color:var(--muted)">${esc(f.cnpj)}</div>` : ''}</td><td style="text-align:left">${esc(f.contato || '—')}</td><td>${esc(f.telefone || '—')}</td></tr>`).join('')}
+      </tbody></table></div>`}
+    </div>
+  </div>`;
+  { const b = $('#fnAdd'); if (b) b.onclick = () => { ESTQ.openForm = ESTQ.openForm === 'forn' ? '' : 'forn'; render(); }; }
+  { const b = $('#pdAdd'); if (b) b.onclick = () => { ESTQ.openForm = ESTQ.openForm === 'pedido' ? '' : 'pedido'; render(); }; }
+  body.querySelectorAll('.pd-rc').forEach(b => b.onclick = () => { const p = (ESTQ.pedidos || []).find(x => x.id === b.dataset.id); if (p) receberPedido(p); });
+  body.querySelectorAll('.pd-cc').forEach(b => b.onclick = () => cancelarPedido(b.dataset.id));
+  bindFornForm(); bindPedForm(itemsSel);
 }
 
 // ===================== CONFIGURAÇÕES (admin) =====================
